@@ -1,0 +1,101 @@
+name: Build libvirt native addon
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag, e.g. v2.2.1-custom.1"
+        required: true
+        default: "v2.2.1-custom.1"
+      node-version:
+        description: "Node.js version, e.g. 22.18.0 or 18.20.8"
+        required: true
+        default: "22.18.0"
+
+permissions:
+  contents: write
+
+jobs:
+  build-linux-x64:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            python3 \
+            pkg-config \
+            libvirt-dev
+
+      - name: Show build environment
+        run: |
+          node -v
+          node -p "process.versions.modules"
+          pkg-config --modversion libvirt || true
+          gcc --version | head -1
+          g++ --version | head -1
+
+      - name: Install npm dependencies
+        run: |
+          corepack enable
+          if [ -f pnpm-lock.yaml ]; then
+            pnpm install --frozen-lockfile
+          elif [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install
+          fi
+
+      - name: Build native addon
+        run: |
+          npx node-gyp rebuild
+
+      - name: Verify native addon
+        run: |
+          find build -type f -name "*.node" -print
+          file build/Release/*.node
+          ldd build/Release/*.node || true
+
+      - name: Read package metadata
+        id: meta
+        shell: bash
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          ABI=$(node -p "process.versions.modules")
+          PLATFORM="linux"
+          ARCH="x64"
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "abi=$ABI" >> "$GITHUB_OUTPUT"
+          echo "platform=$PLATFORM" >> "$GITHUB_OUTPUT"
+          echo "arch=$ARCH" >> "$GITHUB_OUTPUT"
+          echo "filename=libvirt-v${VERSION}-node-v${ABI}-${PLATFORM}-${ARCH}.tar.gz" >> "$GITHUB_OUTPUT"
+
+      - name: Package tar.gz
+        run: |
+          mkdir -p package/build/Release
+          cp build/Release/*.node package/build/Release/libvirt.node
+          [ -f package.json ] && cp package.json package/
+          [ -d dist ] && cp -r dist package/
+
+          tar -czf "${{ steps.meta.outputs.filename }}" -C package .
+
+          ls -lh "${{ steps.meta.outputs.filename }}"
+          tar -tzf "${{ steps.meta.outputs.filename }}"
+
+      - name: Create GitHub Release and upload asset
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag }}
+          name: ${{ inputs.tag }}
+          files: ${{ steps.meta.outputs.filename }}
